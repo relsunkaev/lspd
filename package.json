@@ -1,0 +1,34 @@
+{
+  "name": "lspd",
+  "version": "0.0.1",
+  "description": "LSP multiplexer daemon for sharing language servers across editors",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "bun@1.3.5",
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "bin": {
+    "lspd": "bin/lspd",
+    "lsp-mux": "bin/lspd"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "fmt": "bun fmt",
+    "check": "bun test"
+  },
+  "keywords": [
+    "lsp",
+    "language-server",
+    "multiplex",
+    "daemon",
+    "bun"
+  ]
+}

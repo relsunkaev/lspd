@@ -1,0 +1,9 @@
+{
+  "name": "lspd-test-proj",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20251216.1",
+    "oxlint": "1.33.0"
+  }
+}

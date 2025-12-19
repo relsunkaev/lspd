@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# build artifacts
+/dist/
+
+# runtime state
+*.log
+
+# local dev
+.DS_Store
+
+# lspd test/build scratch
+/tmp/
+
+# bun test fixtures
+/test-fixtures/proj/node_modules/
+
+# editor
+.vscode/
+.idea/
