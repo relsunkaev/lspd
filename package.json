@@ -2,6 +2,14 @@
   "name": "lspd",
   "version": "0.0.1",
   "description": "LSP multiplexer daemon for sharing language servers across editors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/relsunkaev/lspd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/relsunkaev/lspd/issues"
+  },
+  "homepage": "https://github.com/relsunkaev/lspd#readme",
   "license": "MIT",
   "type": "module",
   "packageManager": "bun@1.3.5",
