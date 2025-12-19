@@ -10,16 +10,44 @@ export function encodeMessage(message: JsonRpcMessage): Buffer {
 }
 
 export async function* readMessages(readable: Readable): AsyncGenerator<JsonRpcMessage> {
-  let buffer = Buffer.alloc(0);
+  let buffer = Buffer.allocUnsafe(8192);
+  let start = 0;
+  let end = 0;
+
+  const ensureCapacity = (incoming: number) => {
+    const available = buffer.length - end;
+    if (available >= incoming) return;
+
+    // Slide existing data to the start if there's slack.
+    if (start > 0) {
+      buffer.copy(buffer, 0, start, end);
+      end -= start;
+      start = 0;
+    }
+
+    if (buffer.length - end >= incoming) return;
+
+    const used = end - start;
+    const nextSize = Math.max(buffer.length * 2, used + incoming);
+    const next = Buffer.allocUnsafe(nextSize);
+    buffer.copy(next, 0, start, end);
+    buffer = next;
+    end = used;
+    start = 0;
+  };
 
   for await (const chunk of readable) {
-    buffer = Buffer.concat([buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    ensureCapacity(buf.length);
+    buf.copy(buffer, end);
+    end += buf.length;
 
     while (true) {
-      const headerEnd = buffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) break;
+      const headerIdx = buffer.subarray(start, end).indexOf("\r\n\r\n");
+      if (headerIdx === -1) break;
 
-      const header = buffer.slice(0, headerEnd).toString("utf8");
+      const headerEnd = start + headerIdx;
+      const header = buffer.toString("utf8", start, headerEnd);
       const contentLength = parseContentLength(header);
       if (contentLength == null) {
         throw new Error(`Missing Content-Length header: ${header}`);
@@ -27,10 +55,14 @@ export async function* readMessages(readable: Readable): AsyncGenerator<JsonRpcM
 
       const messageStart = headerEnd + 4;
       const messageEnd = messageStart + contentLength;
-      if (buffer.length < messageEnd) break;
+      if (end < messageEnd) break;
 
-      const body = buffer.slice(messageStart, messageEnd).toString("utf8");
-      buffer = buffer.slice(messageEnd);
+      const body = buffer.toString("utf8", messageStart, messageEnd);
+      start = messageEnd;
+      if (start === end) {
+        start = 0;
+        end = 0;
+      }
 
       yield JSON.parse(body) as JsonRpcMessage;
     }

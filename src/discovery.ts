@@ -1,7 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import childProcess from "node:child_process";
+import { promisify } from "node:util";
+
+const execFile = promisify(childProcess.execFile);
 
 export type ServerName = "tsgo" | "oxlint";
 
@@ -39,7 +42,7 @@ export async function findBinary(
   const local = await findLocalBinary(server, startDir);
   if (local) return { cmd: local, args: lspArgs(server) };
 
-  const global = findGlobalBinary(server);
+  const global = await findGlobalBinary(server);
   if (global) return { cmd: global, args: lspArgs(server) };
 
   // Fallback: install+run via bunx.
@@ -88,19 +91,32 @@ async function findLocalBinary(server: ServerName, startDir: string): Promise<st
   return null;
 }
 
-function findGlobalBinary(server: ServerName): string | null {
+const globalBinaryCache = new Map<ServerName, string | null>();
+
+async function findGlobalBinary(server: ServerName): Promise<string | null> {
+  if (globalBinaryCache.has(server)) return globalBinaryCache.get(server)!;
+
   const name = server;
-  const which = childProcess.spawnSync("which", [name], { encoding: "utf8" });
-  if (which.status !== 0) return null;
-  const first = which.stdout
-    .split("\n")
-    .map((s) => s.trim())
-    .find(Boolean);
-  if (!first) return null;
   try {
-    accessSync(first, fsConstants.X_OK);
-    return first;
+    const { stdout } = await execFile("which", [name], { encoding: "utf8" });
+    const first = stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .find(Boolean);
+    if (!first) {
+      globalBinaryCache.set(server, null);
+      return null;
+    }
+    try {
+      await fs.access(first, fsConstants.X_OK);
+      globalBinaryCache.set(server, first);
+      return first;
+    } catch {
+      globalBinaryCache.set(server, null);
+      return null;
+    }
   } catch {
+    globalBinaryCache.set(server, null);
     return null;
   }
 }

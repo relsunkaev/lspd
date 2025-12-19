@@ -2,6 +2,7 @@ import childProcess, { type ChildProcessWithoutNullStreams } from "node:child_pr
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import type { Writable } from "node:stream";
 
 import { encodeMessage, readMessages, type JsonRpcMessage } from "../lsp/framing";
 import { findBinary, type ServerName } from "../discovery";
@@ -33,6 +34,66 @@ type ClientConn = {
   write: (msg: JsonRpcMessage) => void;
   close: () => void;
 };
+
+class BufferedWriter {
+  private stream: Writable;
+  private queue: Buffer[] = [];
+  private waitingForDrain = false;
+  private paused = false;
+  private onBackpressure?: () => void;
+  private onResume?: () => void;
+
+  constructor(
+    stream: Writable,
+    hooks?: { onBackpressure?: () => void; onResume?: () => void },
+  ) {
+    this.stream = stream;
+    this.onBackpressure = hooks?.onBackpressure;
+    this.onResume = hooks?.onResume;
+  }
+
+  write(buf: Buffer): void {
+    if (this.waitingForDrain) {
+      this.queue.push(buf);
+      this.pauseIfNeeded();
+      return;
+    }
+
+    const ok = this.stream.write(buf);
+    if (!ok) {
+      this.waitingForDrain = true;
+      this.pauseIfNeeded();
+      this.stream.once("drain", () => this.flush());
+      return;
+    }
+  }
+
+  private flush(): void {
+    this.waitingForDrain = false;
+
+    while (this.queue.length > 0) {
+      const next = this.queue.shift()!;
+      const ok = this.stream.write(next);
+      if (!ok) {
+        this.waitingForDrain = true;
+        this.pauseIfNeeded();
+        this.stream.once("drain", () => this.flush());
+        return;
+      }
+    }
+
+    if (!this.waitingForDrain && this.queue.length === 0 && this.paused) {
+      this.paused = false;
+      this.onResume?.();
+    }
+  }
+
+  private pauseIfNeeded(): void {
+    if (this.paused) return;
+    this.paused = true;
+    this.onBackpressure?.();
+  }
+}
 
 export async function runDaemon(argv: string[]): Promise<void> {
   const { server, projectRoot, socketPath } = parseDaemonArgs(argv);
@@ -97,9 +158,11 @@ class MuxState {
   private server: ServerName;
   private projectRoot: string;
   private lsp: ChildProcessWithoutNullStreams;
+  private lspWriter: BufferedWriter;
 
   private nextClientId = 1;
   private clients = new Map<number, ClientConn>();
+  private clientWriters = new Map<number, BufferedWriter>();
   private primaryClientId: number | null = null;
 
   private nextServerRequestId = 1;
@@ -111,6 +174,7 @@ class MuxState {
   private diagnosticsInFlight = new Set<string>();
   private lastPublishedDiagnostics = new Map<string, unknown[]>();
   private pendingDiagnosticsAfterInit = new Set<string>();
+  private backpressuredClients = new Set<number>();
 
   // Maps negative client request ids (used for forwarding server-initiated requests)
   // to the original server request id.
@@ -119,11 +183,18 @@ class MuxState {
 
   private init: InitState = { state: "not_started" };
   private queuedInitialize = new Array<{ clientId: number; id: JsonRpcId }>();
+  private lspReadsPaused = false;
+  private clientReadsPaused = false;
 
   constructor(server: ServerName, projectRoot: string, lsp: ChildProcessWithoutNullStreams) {
     this.server = server;
     this.projectRoot = projectRoot;
     this.lsp = lsp;
+
+    this.lspWriter = new BufferedWriter(lsp.stdin, {
+      onBackpressure: () => this.pauseClientReads(),
+      onResume: () => this.resumeClientReads(),
+    });
   }
 
   async startServerReadLoop(): Promise<void> {
@@ -150,11 +221,16 @@ class MuxState {
   addClient(socket: net.Socket): void {
     const clientId = this.nextClientId++;
 
+    const writer = new BufferedWriter(socket, {
+      onBackpressure: () => this.markClientBackpressure(clientId),
+      onResume: () => this.clearClientBackpressure(clientId),
+    });
+
     const conn: ClientConn = {
       id: clientId,
       socket,
       write: (msg) => {
-        socket.write(encodeMessage(msg));
+        writer.write(encodeMessage(msg));
       },
       close: () => {
         try {
@@ -166,13 +242,16 @@ class MuxState {
     };
 
     this.clients.set(clientId, conn);
+    this.clientWriters.set(clientId, writer);
     this.clientSupportsPullDiagnostics.set(clientId, false);
 
     if (this.primaryClientId == null) this.primaryClientId = clientId;
 
     socket.on("close", () => {
       this.clients.delete(clientId);
+      this.clientWriters.delete(clientId);
       this.clientSupportsPullDiagnostics.delete(clientId);
+      this.clearClientBackpressure(clientId);
 
       if (this.primaryClientId === clientId) {
         this.primaryClientId = this.clients.keys().next().value ?? null;
@@ -196,6 +275,46 @@ class MuxState {
         conn.close();
       }
     })();
+  }
+
+  private markClientBackpressure(clientId: number): void {
+    if (this.backpressuredClients.has(clientId)) return;
+    this.backpressuredClients.add(clientId);
+    this.pauseLspReads();
+  }
+
+  private clearClientBackpressure(clientId: number): void {
+    if (!this.backpressuredClients.delete(clientId)) return;
+    this.resumeLspReads();
+  }
+
+  private pauseLspReads(): void {
+    if (this.lspReadsPaused) return;
+    this.lspReadsPaused = true;
+    this.lsp.stdout.pause();
+  }
+
+  private resumeLspReads(): void {
+    if (!this.lspReadsPaused) return;
+    if (this.backpressuredClients.size > 0) return;
+    this.lspReadsPaused = false;
+    this.lsp.stdout.resume();
+  }
+
+  private pauseClientReads(): void {
+    if (this.clientReadsPaused) return;
+    this.clientReadsPaused = true;
+    for (const c of this.clients.values()) {
+      c.socket.pause();
+    }
+  }
+
+  private resumeClientReads(): void {
+    if (!this.clientReadsPaused) return;
+    this.clientReadsPaused = false;
+    for (const c of this.clients.values()) {
+      c.socket.resume();
+    }
   }
 
   private shutdown(): void {
@@ -235,6 +354,11 @@ class MuxState {
 
   private onClientNotification(clientId: number, method: string, msg: JsonRpcMessage): void {
     this.maybeTriggerTsgoDiagnostics(method, msg);
+
+    if (method === "textDocument/didClose") {
+      const uri = (msg as any).params?.textDocument?.uri;
+      if (uri) this.clearDiagnosticsForUri(uri);
+    }
 
     if (method === "initialized") {
       // Only forward the primary client's initialized.
@@ -481,6 +605,18 @@ class MuxState {
     this.scheduleTsgoDiagnostics(uri);
   }
 
+  private clearDiagnosticsForUri(uri: string): void {
+    if (this.server !== "tsgo") return;
+
+    const timer = this.diagnosticDebounce.get(uri);
+    if (timer) clearTimeout(timer);
+
+    this.diagnosticDebounce.delete(uri);
+    this.lastPublishedDiagnostics.delete(uri);
+    this.pendingDiagnosticsAfterInit.delete(uri);
+    this.diagnosticsInFlight.delete(uri);
+  }
+
   private scheduleTsgoDiagnostics(uri: string): void {
     if (this.server !== "tsgo") return;
 
@@ -596,7 +732,7 @@ class MuxState {
   }
 
   private writeToServer(msg: JsonRpcMessage): void {
-    this.lsp.stdin.write(encodeMessage(msg));
+    this.lspWriter.write(encodeMessage(msg));
   }
 }
 
@@ -643,5 +779,5 @@ async function canConnect(socketPath: string): Promise<boolean> {
       resolve(true);
     });
     sock.once("error", () => resolve(false));
-  });
-}
+    });
+  }

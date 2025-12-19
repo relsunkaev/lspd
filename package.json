@@ -1,6 +1,6 @@
 {
   "name": "lspd",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "LSP multiplexer daemon for sharing language servers across editors",
   "repository": {
     "type": "git",
