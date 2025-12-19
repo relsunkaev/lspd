@@ -18,8 +18,7 @@
     "bun": ">=1.0.0"
   },
   "bin": {
-    "lspd": "bin/lspd",
-    "lsp-mux": "bin/lspd"
+    "lspd": "bin/lspd"
   },
   "files": [
     "bin",

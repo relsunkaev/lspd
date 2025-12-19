@@ -43,7 +43,7 @@ async function ensureDaemonRunning(server: ServerName, projectRoot: string): Pro
   if (await canConnect(socketPath)) return;
 
   // In tests, keep the daemon attached so failures surface.
-  const testMode = process.env.LSPD_TEST === "1" || process.env.LSP_MUX_TEST === "1";
+  const testMode = process.env.LSPD_TEST === "1";
 
   // Best-effort lock: create pid file exclusively.
   // If it exists, someone else is likely starting.

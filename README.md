@@ -56,8 +56,6 @@ Environment variables:
 - `LSPD_TSGO_BIN=/absolute/path/to/tsgo`
 - `LSPD_OXLINT_BIN=/absolute/path/to/oxlint`
 
-(For backward compatibility, `LSP_MUX_TSGO_BIN` / `LSP_MUX_OXLINT_BIN` are also accepted.)
-
 ## How it works (high-level)
 
 - `lspd connect <server>` ensures a per-project daemon is running.

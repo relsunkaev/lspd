@@ -33,10 +33,7 @@ export async function findBinary(
   server: ServerName,
   startDir: string,
 ): Promise<{ cmd: string; args: string[] }> {
-  const forced =
-    server === "tsgo"
-      ? (process.env.LSPD_TSGO_BIN ?? process.env.LSP_MUX_TSGO_BIN)
-      : (process.env.LSPD_OXLINT_BIN ?? process.env.LSP_MUX_OXLINT_BIN);
+  const forced = server === "tsgo" ? process.env.LSPD_TSGO_BIN : process.env.LSPD_OXLINT_BIN;
   if (forced) return { cmd: forced, args: lspArgs(server) };
 
   const local = await findLocalBinary(server, startDir);
