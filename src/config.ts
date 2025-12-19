@@ -31,3 +31,7 @@ export function daemonPidPath(server: string, projectRoot: string): string {
 export function daemonLogPath(server: string, projectRoot: string): string {
   return path.join(daemonDir(server, projectRoot), "daemon.log");
 }
+
+export function daemonMetaPath(server: string, projectRoot: string): string {
+  return path.join(daemonDir(server, projectRoot), "meta.json");
+}

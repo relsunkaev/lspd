@@ -40,6 +40,16 @@ lspd connect tsgo --project /path/to/project
 lspd connect oxlint --project /path/to/project
 ```
 
+### Manage daemons
+
+```bash
+lspd lsps
+lspd lsps --json
+
+lspd stop tsgo --project /path/to/project
+lspd stop --all
+```
+
 Your editor should start `lspd connect <server>` and speak LSP over stdin/stdout.
 
 ### Neovim example

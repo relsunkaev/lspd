@@ -1,4 +1,5 @@
 import { runConnect } from "./cli/connect";
+import { runLsps, runStop } from "./cli/manage";
 import { runDaemon } from "./daemon/daemon";
 
 export async function main(argv: string[]): Promise<void> {
@@ -13,6 +14,12 @@ export async function main(argv: string[]): Promise<void> {
   switch (command) {
     case "connect":
       await runConnect(rest);
+      return;
+    case "lsps":
+      await runLsps(rest);
+      return;
+    case "stop":
+      await runStop(rest);
       return;
     case "daemon":
       await runDaemon(rest);
@@ -29,6 +36,9 @@ function usage(): void {
   process.stderr.write(
     "Usage:\n" +
       "  lspd connect <tsgo|oxlint> [--project <path>]\n" +
+      "  lspd lsps [--json]\n" +
+      "  lspd stop <tsgo|oxlint> [--project <path>]\n" +
+      "  lspd stop --all\n" +
       "\n" +
       "Internal:\n" +
       "  lspd daemon --server <name> --projectRoot <path> --socket <path>\n",

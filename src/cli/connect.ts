@@ -3,7 +3,13 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 
-import { daemonDir, daemonLogPath, daemonPidPath, daemonSocketPath } from "../config";
+import {
+  daemonDir,
+  daemonLogPath,
+  daemonMetaPath,
+  daemonPidPath,
+  daemonSocketPath,
+} from "../config";
 import { resolveProjectRoot, type ServerName } from "../discovery";
 
 export async function runConnect(argv: string[]): Promise<void> {
@@ -40,6 +46,16 @@ async function ensureDaemonRunning(server: ServerName, projectRoot: string): Pro
   await fs.mkdir(dir, { recursive: true });
 
   const socketPath = daemonSocketPath(server, projectRoot);
+
+  await fs.writeFile(
+    daemonMetaPath(server, projectRoot),
+    JSON.stringify(
+      { server, projectRoot, socketPath, updatedAt: new Date().toISOString() },
+      null,
+      2,
+    ) + "\n",
+  );
+
   if (await canConnect(socketPath)) return;
 
   // In tests, keep the daemon attached so failures surface.
