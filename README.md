@@ -43,11 +43,13 @@ lspd connect oxlint --project /path/to/project
 ### Manage daemons
 
 ```bash
-lspd lsps
-lspd lsps --json
+lspd ps
+lspd ps --json
 
-lspd stop tsgo --project /path/to/project
-lspd stop --all
+lspd kill tsgo --project /path/to/project
+lspd kill --all
+
+lspd prune
 ```
 
 Your editor should start `lspd connect <server>` and speak LSP over stdin/stdout.

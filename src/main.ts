@@ -1,5 +1,5 @@
 import { runConnect } from "./cli/connect";
-import { runLsps, runStop } from "./cli/manage";
+import { runKill, runPrune, runPs } from "./cli/manage";
 import { runDaemon } from "./daemon/daemon";
 import { allServers } from "./servers";
 
@@ -16,11 +16,14 @@ export async function main(argv: string[]): Promise<void> {
     case "connect":
       await runConnect(rest);
       return;
-    case "lsps":
-      await runLsps(rest);
+    case "ps":
+      await runPs(rest);
       return;
-    case "stop":
-      await runStop(rest);
+    case "kill":
+      await runKill(rest);
+      return;
+    case "prune":
+      await runPrune(rest);
       return;
     case "daemon":
       await runDaemon(rest);
@@ -41,9 +44,10 @@ function usage(): void {
   process.stderr.write(
     "Usage:\n" +
       `  lspd connect <${names}> [--project <path>]\n` +
-      "  lspd lsps [--json]\n" +
-      `  lspd stop <${names}> [--project <path>]\n` +
-      "  lspd stop --all\n" +
+      "  lspd ps [--json]\n" +
+      `  lspd kill <${names}> [--project <path>]\n` +
+      "  lspd kill --all\n" +
+      "  lspd prune\n" +
       "\n" +
       "Internal:\n" +
       "  lspd daemon --server <name> --projectRoot <path> --socket <path>\n",

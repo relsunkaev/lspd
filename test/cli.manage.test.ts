@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 
 import { daemonDir, daemonMetaPath, daemonPidPath, daemonSocketPath } from "../src/config";
-import { runLsps, runStop } from "../src/cli/manage";
+import { runKill, runPrune, runPs } from "../src/cli/manage";
 
 let originalHome: string | undefined;
 let tmpHome: string;
@@ -32,30 +32,50 @@ afterEach(async () => {
 });
 
 describe("cli manage", () => {
-  test("lsps prints none when empty", async () => {
-    const out = await captureStdout(() => runLsps([]));
+  test("ps prints none when empty", async () => {
+    const out = await captureStdout(() => runPs([]));
     expect(out).toContain("No lspd daemons found.");
   });
 
-  test("lsps --json lists daemons", async () => {
+  test("ps --json lists daemons", async () => {
     const proj = path.join(tmpHome, "proj");
     await createDaemon("tsgo", proj, 999_999);
     await createDaemon("oxlint", proj, 999_998);
 
-    const out = await captureStdout(() => runLsps(["--json"]));
+    const out = await captureStdout(() => runPs(["--json"]));
     const parsed = JSON.parse(out);
     expect(Array.isArray(parsed.daemons)).toBe(true);
     expect(parsed.daemons.length).toBe(2);
     expect(parsed.daemons.map((d: any) => d.server).sort()).toEqual(["oxlint", "tsgo"]);
   });
 
-  test("stop --all reports stopped count", async () => {
+  test("kill --all reports stopped count", async () => {
     const proj = path.join(tmpHome, "proj");
     await createDaemon("tsgo", proj, 999_997);
     await createDaemon("oxlint", proj, 999_996);
 
-    const out = await captureStdout(() => runStop(["--all"]));
+    const out = await captureStdout(() => runKill(["--all"]));
     expect(out.trim()).toBe("Stopped 2 daemon(s).");
+  });
+
+  test("prune removes stale daemon dirs", async () => {
+    const proj = path.join(tmpHome, "proj");
+    await createDaemon("tsgo", proj, 999_995);
+    await createDaemon("oxlint", proj, 999_994);
+
+    const tsgoDir = daemonDir("tsgo", proj);
+    const oxlintDir = daemonDir("oxlint", proj);
+
+    const out = await captureStdout(() => runPrune([]));
+    expect(out.trim()).toBe("Pruned 2 daemon(s).");
+
+    await expect(fs.access(tsgoDir)).rejects.toBeTruthy();
+    await expect(fs.access(oxlintDir)).rejects.toBeTruthy();
+  });
+
+  test("prune reports none when clean", async () => {
+    const out = await captureStdout(() => runPrune([]));
+    expect(out.trim()).toBe("No stale daemons to prune.");
   });
 });
 

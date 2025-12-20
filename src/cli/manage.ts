@@ -13,7 +13,7 @@ type DaemonMeta = {
   updatedAt?: string;
 };
 
-export async function runLsps(argv: string[]): Promise<void> {
+export async function runPs(argv: string[]): Promise<void> {
   const json = argv.includes("--json");
 
   const entries = await listDaemonEntries();
@@ -36,15 +36,15 @@ export async function runLsps(argv: string[]): Promise<void> {
   }
 }
 
-export async function runStop(argv: string[]): Promise<void> {
-  const { all, server, project } = parseStopArgs(argv);
+export async function runKill(argv: string[]): Promise<void> {
+  const { all, server, project } = parseKillArgs(argv);
 
   const targets = all
     ? await listDaemonEntries()
     : [await entryFor(server!, await resolveProjectRoot(project))].filter(Boolean);
 
   if (targets.length === 0) {
-    process.stderr.write(all ? "No daemons to stop.\n" : "No matching daemon found.\n");
+    process.stderr.write(all ? "No daemons to kill.\n" : "No matching daemon found.\n");
     process.exitCode = 1;
     return;
   }
@@ -59,7 +59,35 @@ export async function runStop(argv: string[]): Promise<void> {
   process.stdout.write(`Stopped ${stopped} daemon(s).\n`);
 }
 
-function parseStopArgs(argv: string[]): {
+export async function runPrune(argv: string[]): Promise<void> {
+  if (argv.length > 0) {
+    throw new Error("Usage: lspd prune");
+  }
+
+  const entries = await listDaemonEntries();
+  const stale = entries.filter((e) => !e.pidAlive && !e.socketAlive);
+
+  if (stale.length === 0) {
+    process.stdout.write("No stale daemons to prune.\n");
+    return;
+  }
+
+  const daemonsRoot = path.join(cacheDir(), "daemons");
+  let pruned = 0;
+
+  for (const e of stale) {
+    try {
+      await fs.rm(path.join(daemonsRoot, e.id), { recursive: true, force: true });
+      pruned++;
+    } catch {
+      // ignore
+    }
+  }
+
+  process.stdout.write(`Pruned ${pruned} daemon(s).\n`);
+}
+
+function parseKillArgs(argv: string[]): {
   all: boolean;
   server?: ServerName;
   project?: string;
@@ -69,9 +97,11 @@ function parseStopArgs(argv: string[]): {
   const [serverRaw, ...rest] = argv;
   const spec = serverRaw ? resolveServer(serverRaw) : null;
   if (!spec) {
-    const names = allServers().map((s) => s.name).join("|");
+    const names = allServers()
+      .map((s) => s.name)
+      .join("|");
     throw new Error(
-      `Usage: lspd stop <server> [--project <path>] | lspd stop --all (known: ${names || "none"})`,
+      `Usage: lspd kill <server> [--project <path>] | lspd kill --all (known: ${names || "none"})`,
     );
   }
 
