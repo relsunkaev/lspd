@@ -1,21 +1,19 @@
+import childProcess from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { constants as fsConstants } from "node:fs";
-import childProcess from "node:child_process";
 import { promisify } from "node:util";
+
+import { allServers, resolveServer, type ServerSpec } from "./servers";
 
 const execFile = promisify(childProcess.execFile);
 
-export type ServerName = "tsgo" | "oxlint";
+export type ServerName = string;
 
 export function lspArgs(server: ServerName): string[] {
-  switch (server) {
-    case "tsgo":
-      // typescript-go uses `tsgo --lsp -stdio` (Go flag parsing).
-      return ["--lsp", "-stdio"];
-    case "oxlint":
-      return ["--lsp"];
-  }
+  const spec = resolveServer(server);
+  if (!spec) throw new Error(`Unknown server '${server}'`);
+  return spec.binary.args;
 }
 
 export async function resolveProjectRoot(projectHint: string | undefined): Promise<string> {
@@ -36,51 +34,50 @@ export async function findBinary(
   server: ServerName,
   startDir: string,
 ): Promise<{ cmd: string; args: string[] }> {
-  const forced = server === "tsgo" ? process.env.LSPD_TSGO_BIN : process.env.LSPD_OXLINT_BIN;
-  if (forced) return { cmd: forced, args: lspArgs(server) };
-
-  const local = await findLocalBinary(server, startDir);
-  if (local) return { cmd: local, args: lspArgs(server) };
-
-  const global = await findGlobalBinary(server);
-  if (global) return { cmd: global, args: lspArgs(server) };
-
-  // Fallback: install+run via bunx.
-  // This keeps the mux functional even if the project hasn't installed the server.
-  if (server === "tsgo") {
-    return {
-      cmd: "bunx",
-      args: ["--package", "@typescript/native-preview", "tsgo", ...lspArgs(server)],
-    };
+  const spec = resolveServer(server);
+  if (!spec) {
+    const known = allServers().map((s) => s.name).join("|");
+    throw new Error(`Unknown server '${server}' (known: ${known || "none"})`);
   }
 
-  return { cmd: "bunx", args: ["oxlint", ...lspArgs(server)] };
+  return await findBinaryForSpec(spec, startDir);
 }
 
-async function findLocalBinary(server: ServerName, startDir: string): Promise<string | null> {
-  const binaryName = server;
+export async function findBinaryForSpec(
+  spec: ServerSpec,
+  startDir: string,
+): Promise<{ cmd: string; args: string[] }> {
+  const forced = spec.binary.envVar ? process.env[spec.binary.envVar] : undefined;
+  if (forced) return { cmd: forced, args: spec.binary.args };
+
+  const local = await findLocalBinary(spec, startDir);
+  if (local) return { cmd: local, args: spec.binary.args };
+
+  const global = await findGlobalBinary(spec);
+  if (global) return { cmd: global, args: spec.binary.args };
+
+  const bunx = spec.binary.bunx;
+  if (bunx) {
+    const bin = bunx.bin ?? spec.name;
+    const bunxArgs = bunx.args ?? [];
+    return { cmd: "bunx", args: ["--package", bunx.package, bin, ...bunxArgs, ...spec.binary.args] };
+  }
+
+  throw new Error(`Unable to resolve binary for server '${spec.name}'`);
+}
+
+async function findLocalBinary(spec: ServerSpec, startDir: string): Promise<string | null> {
   let current = startDir;
 
-  // Walk up until filesystem root.
   while (true) {
-    const candidate = path.join(current, "node_modules", ".bin", binaryName);
-    if (await isExecutable(candidate)) return candidate;
+    for (const binaryName of spec.binary.binaryNames) {
+      const candidate = path.join(current, "node_modules", ".bin", binaryName);
+      if (await isExecutable(candidate)) return candidate;
+    }
 
-    // Native-preview also provides bin/tsgo.js which can be invoked directly.
-    if (server === "tsgo") {
-      const previewBin = path.join(
-        current,
-        "node_modules",
-        "@typescript",
-        "native-preview",
-        "bin",
-        "tsgo.js",
-      );
-      if (await exists(previewBin)) {
-        // Prefer going through the shim in node_modules/.bin when available,
-        // but `tsgo.js` is better than network fetching.
-        return previewBin;
-      }
+    if (spec.binary.extraLocal) {
+      const extra = await spec.binary.extraLocal(current);
+      if (extra) return extra;
     }
 
     const parent = path.dirname(current);
@@ -91,34 +88,33 @@ async function findLocalBinary(server: ServerName, startDir: string): Promise<st
   return null;
 }
 
-const globalBinaryCache = new Map<ServerName, string | null>();
+const globalBinaryCache = new Map<string, string | null>();
 
-async function findGlobalBinary(server: ServerName): Promise<string | null> {
-  if (globalBinaryCache.has(server)) return globalBinaryCache.get(server)!;
+async function findGlobalBinary(spec: ServerSpec): Promise<string | null> {
+  if (globalBinaryCache.has(spec.name)) return globalBinaryCache.get(spec.name)!;
 
-  const name = server;
-  try {
-    const { stdout } = await execFile("which", [name], { encoding: "utf8" });
-    const first = stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .find(Boolean);
-    if (!first) {
-      globalBinaryCache.set(server, null);
-      return null;
-    }
+  for (const name of spec.binary.binaryNames) {
     try {
-      await fs.access(first, fsConstants.X_OK);
-      globalBinaryCache.set(server, first);
-      return first;
+      const { stdout } = await execFile("which", [name], { encoding: "utf8" });
+      const first = stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .find(Boolean);
+      if (!first) continue;
+      try {
+        await fs.access(first, fsConstants.X_OK);
+        globalBinaryCache.set(spec.name, first);
+        return first;
+      } catch {
+        // ignore and keep searching
+      }
     } catch {
-      globalBinaryCache.set(server, null);
-      return null;
+      // ignore and keep searching
     }
-  } catch {
-    globalBinaryCache.set(server, null);
-    return null;
   }
+
+  globalBinaryCache.set(spec.name, null);
+  return null;
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {

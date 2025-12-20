@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { cacheDir, daemonDir, daemonMetaPath, daemonPidPath, daemonSocketPath } from "../config";
 import { resolveProjectRoot, type ServerName } from "../discovery";
+import { allServers, resolveServer } from "../servers";
 
 type DaemonMeta = {
   server: ServerName;
@@ -66,8 +67,12 @@ function parseStopArgs(argv: string[]): {
   if (argv.includes("--all")) return { all: true };
 
   const [serverRaw, ...rest] = argv;
-  if (serverRaw !== "tsgo" && serverRaw !== "oxlint") {
-    throw new Error("Usage: lspd stop <tsgo|oxlint> [--project <path>] | lspd stop --all");
+  const spec = serverRaw ? resolveServer(serverRaw) : null;
+  if (!spec) {
+    const names = allServers().map((s) => s.name).join("|");
+    throw new Error(
+      `Usage: lspd stop <server> [--project <path>] | lspd stop --all (known: ${names || "none"})`,
+    );
   }
 
   let project: string | undefined;
@@ -78,7 +83,7 @@ function parseStopArgs(argv: string[]): {
     }
   }
 
-  return { all: false, server: serverRaw, project };
+  return { all: false, server: spec.name, project };
 }
 
 async function listDaemonEntries(): Promise<

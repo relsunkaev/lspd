@@ -11,6 +11,7 @@ import {
   daemonSocketPath,
 } from "../config";
 import { resolveProjectRoot, type ServerName } from "../discovery";
+import { allServers, resolveServer } from "../servers";
 
 export async function runConnect(argv: string[]): Promise<void> {
   const { server, project } = parseConnectArgs(argv);
@@ -24,8 +25,10 @@ export async function runConnect(argv: string[]): Promise<void> {
 
 function parseConnectArgs(argv: string[]): { server: ServerName; project: string | undefined } {
   const [serverRaw, ...rest] = argv;
-  if (serverRaw !== "tsgo" && serverRaw !== "oxlint") {
-    throw new Error(`Unknown server '${serverRaw ?? ""}' (expected tsgo|oxlint)`);
+  const spec = serverRaw ? resolveServer(serverRaw) : null;
+  if (!spec) {
+    const names = allServers().map((s) => s.name).join("|");
+    throw new Error(`Unknown server '${serverRaw ?? ""}' (known: ${names || "none"})`);
   }
 
   let project: string | undefined;
@@ -38,7 +41,7 @@ function parseConnectArgs(argv: string[]): { server: ServerName; project: string
     }
   }
 
-  return { server: serverRaw, project };
+  return { server: spec.name, project };
 }
 
 async function ensureDaemonRunning(server: ServerName, projectRoot: string): Promise<void> {

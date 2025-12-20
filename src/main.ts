@@ -1,6 +1,7 @@
 import { runConnect } from "./cli/connect";
 import { runLsps, runStop } from "./cli/manage";
 import { runDaemon } from "./daemon/daemon";
+import { allServers } from "./servers";
 
 export async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
@@ -32,12 +33,16 @@ export async function main(argv: string[]): Promise<void> {
 }
 
 function usage(): void {
+  const names = allServers()
+    .map((s) => s.name)
+    .join("|");
+
   // Keep it terse: this is usually run by editors.
   process.stderr.write(
     "Usage:\n" +
-      "  lspd connect <tsgo|oxlint> [--project <path>]\n" +
+      `  lspd connect <${names}> [--project <path>]\n` +
       "  lspd lsps [--json]\n" +
-      "  lspd stop <tsgo|oxlint> [--project <path>]\n" +
+      `  lspd stop <${names}> [--project <path>]\n` +
       "  lspd stop --all\n" +
       "\n" +
       "Internal:\n" +

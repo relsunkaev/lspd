@@ -5,9 +5,17 @@ import path from "node:path";
 import type { Writable } from "node:stream";
 
 import { encodeMessage, readMessages, type JsonRpcMessage } from "../lsp/framing";
-import { findBinary, type ServerName } from "../discovery";
+import { findBinaryForSpec, type ServerName } from "../discovery";
+import { DiagnosticsBridge, type DiagnosticsBridgeConfig } from "./diagnosticsBridge";
+import { resolveServer, type ServerSpec } from "../servers";
 
 type JsonRpcId = string | number;
+
+type MuxOptions = {
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  idleTimeoutMs?: number;
+  silent?: boolean;
+};
 
 type InitState =
   | { state: "not_started" }
@@ -20,7 +28,7 @@ type PendingRequest = {
 };
 
 type PendingInternalRequest = {
-  kind: "tsgo_pull_diagnostics";
+  kind: "bridge_pull_diagnostics";
   uri: string;
 };
 
@@ -106,9 +114,14 @@ export async function runDaemon(argv: string[]): Promise<void> {
     if (!alive) await fs.rm(socketPath, { force: true });
   }
 
-  const lsp = await spawnLsp(server, projectRoot);
+  const spec = resolveServer(server);
+  if (!spec) {
+    throw new Error(`Unknown server '${server}'`);
+  }
 
-  const state = new MuxState(server, projectRoot, lsp);
+  const lsp = await spawnLsp(spec, projectRoot);
+
+  const state = new MuxState(spec, projectRoot, lsp);
 
   await state.startServerReadLoop();
 
@@ -133,8 +146,7 @@ function parseDaemonArgs(argv: string[]): {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--server") {
-      const v = argv[++i];
-      if (v === "tsgo" || v === "oxlint") server = v;
+      server = argv[++i];
       continue;
     }
     if (arg === "--projectRoot") {
@@ -154,11 +166,12 @@ function parseDaemonArgs(argv: string[]): {
   return { server, projectRoot, socketPath };
 }
 
-class MuxState {
-  private server: ServerName;
+export class MuxState {
+  private spec: ServerSpec;
   private projectRoot: string;
   private lsp: ChildProcessWithoutNullStreams;
   private lspWriter: BufferedWriter;
+  private opts: MuxOptions;
 
   private nextClientId = 1;
   private clients = new Map<number, ClientConn>();
@@ -170,10 +183,7 @@ class MuxState {
   private pendingInternalRequests = new Map<number, PendingInternalRequest>();
 
   private clientSupportsPullDiagnostics = new Map<number, boolean>();
-  private diagnosticDebounce = new Map<string, ReturnType<typeof setTimeout>>();
-  private diagnosticsInFlight = new Set<string>();
-  private lastPublishedDiagnostics = new Map<string, unknown[]>();
-  private pendingDiagnosticsAfterInit = new Set<string>();
+  private diagnosticsBridge: DiagnosticsBridge | null = null;
   private backpressuredClients = new Set<number>();
 
   // Maps negative client request ids (used for forwarding server-initiated requests)
@@ -186,15 +196,35 @@ class MuxState {
   private lspReadsPaused = false;
   private clientReadsPaused = false;
 
-  constructor(server: ServerName, projectRoot: string, lsp: ChildProcessWithoutNullStreams) {
-    this.server = server;
+  private idleTimeoutMs: number;
+
+  constructor(
+    spec: ServerSpec,
+    projectRoot: string,
+    lsp: ChildProcessWithoutNullStreams,
+    opts?: MuxOptions,
+  ) {
+    this.spec = spec;
     this.projectRoot = projectRoot;
     this.lsp = lsp;
+    this.opts = opts ?? {};
+    this.idleTimeoutMs = this.opts.idleTimeoutMs ?? 500;
 
     this.lspWriter = new BufferedWriter(lsp.stdin, {
       onBackpressure: () => this.pauseClientReads(),
       onResume: () => this.resumeClientReads(),
     });
+
+    if (this.usesDiagnosticsBridge()) {
+      this.diagnosticsBridge = new DiagnosticsBridge(
+        this.spec.diagnostics as DiagnosticsBridgeConfig,
+        {
+          publish: (uri, diagnostics) => this.publishDiagnosticsToNonPullClients(uri, diagnostics),
+          sendRequest: (uri, msg) => this.sendDiagnosticsRequest(uri, msg),
+          hasNonPullClients: () => this.hasNonPullClients(),
+        },
+      );
+    }
   }
 
   async startServerReadLoop(): Promise<void> {
@@ -204,17 +234,20 @@ class MuxState {
           this.onServerMessage(msg);
         }
       } catch (err) {
-        process.stderr.write(`lspd: server read loop error: ${String(err)}\n`);
+        if (!this.opts.silent) {
+          process.stderr.write(`lspd: server read loop error: ${String(err)}\n`);
+        }
       }
     })();
 
     this.lsp.on("exit", (code, signal) => {
-      process.stderr.write(`lspd: LSP exited code=${code} signal=${signal}\n`);
+      if (!this.opts.silent) {
+        process.stderr.write(`lspd: LSP exited code=${code} signal=${signal}\n`);
+      }
       for (const c of this.clients.values()) {
         c.close();
       }
-      process.exitCode = code ?? 1;
-      process.exit();
+      this.handleExit(code ?? 1, signal ?? null);
     });
   }
 
@@ -261,7 +294,7 @@ class MuxState {
       if (this.clients.size === 0) {
         setTimeout(() => {
           if (this.clients.size === 0) this.shutdown();
-        }, 500);
+        }, this.idleTimeoutMs);
       }
     });
 
@@ -271,7 +304,9 @@ class MuxState {
           this.onClientMessage(clientId, msg);
         }
       } catch (err) {
-        process.stderr.write(`lspd: client ${clientId} read error: ${String(err)}\n`);
+        if (!this.opts.silent) {
+          process.stderr.write(`lspd: client ${clientId} read error: ${String(err)}\n`);
+        }
         conn.close();
       }
     })();
@@ -323,7 +358,7 @@ class MuxState {
     } catch {
       // ignore
     }
-    process.exit(0);
+    this.handleExit(0, null);
   }
 
   private onClientMessage(clientId: number, msg: JsonRpcMessage): void {
@@ -353,11 +388,11 @@ class MuxState {
   }
 
   private onClientNotification(clientId: number, method: string, msg: JsonRpcMessage): void {
-    this.maybeTriggerTsgoDiagnostics(method, msg);
+    this.maybeTriggerDiagnosticsBridge(method, msg);
 
     if (method === "textDocument/didClose") {
       const uri = (msg as any).params?.textDocument?.uri;
-      if (uri) this.clearDiagnosticsForUri(uri);
+      if (uri) this.diagnosticsBridge?.onDidClose(uri);
     }
 
     if (method === "initialized") {
@@ -487,7 +522,7 @@ class MuxState {
       const response = { result: (msg as any).result, error: (msg as any).error };
       this.init = { state: "done", response };
       this.flushQueuedInitialize();
-      this.flushQueuedDiagnosticsAfterInit();
+      this.diagnosticsBridge?.markInitDone();
     }
 
     const client = this.clients.get(pending.clientId);
@@ -547,29 +582,8 @@ class MuxState {
   }
 
   private prepareInitializeForServer(msg: JsonRpcMessage): JsonRpcMessage {
-    if (this.server !== "tsgo") return msg;
-
-    // Always advertise pull diagnostics support to tsgo.
-    // This lets the mux request diagnostics even if some clients can't.
-    const params = (msg as any).params ?? {};
-    const caps = params.capabilities ?? {};
-    const textDocument = caps.textDocument ?? {};
-
-    if (textDocument.diagnostic) return msg;
-
-    return {
-      ...msg,
-      params: {
-        ...params,
-        capabilities: {
-          ...caps,
-          textDocument: {
-            ...textDocument,
-            diagnostic: { dynamicRegistration: false },
-          },
-        },
-      },
-    } as JsonRpcMessage;
+    const hook = this.spec.hooks?.prepareInitialize;
+    return hook ? hook(msg) : msg;
   }
 
   private recordClientCapabilities(clientId: number, msg: JsonRpcMessage): void {
@@ -578,18 +592,8 @@ class MuxState {
     this.clientSupportsPullDiagnostics.set(clientId, hasPullDiagnostics);
   }
 
-  private maybeTriggerTsgoDiagnostics(method: string, msg: JsonRpcMessage): void {
-    if (this.server !== "tsgo") return;
-
-    // Only useful if at least one connected client can't do pull diagnostics.
-    let needsBridge = false;
-    for (const clientId of this.clients.keys()) {
-      if (!this.clientSupportsPullDiagnostics.get(clientId)) {
-        needsBridge = true;
-        break;
-      }
-    }
-    if (!needsBridge) return;
+  private maybeTriggerDiagnosticsBridge(method: string, msg: JsonRpcMessage): void {
+    if (!this.usesDiagnosticsBridge()) return;
 
     let uri: string | undefined;
 
@@ -602,78 +606,12 @@ class MuxState {
     }
 
     if (!uri) return;
-    this.scheduleTsgoDiagnostics(uri);
-  }
-
-  private clearDiagnosticsForUri(uri: string): void {
-    if (this.server !== "tsgo") return;
-
-    const timer = this.diagnosticDebounce.get(uri);
-    if (timer) clearTimeout(timer);
-
-    this.diagnosticDebounce.delete(uri);
-    this.lastPublishedDiagnostics.delete(uri);
-    this.pendingDiagnosticsAfterInit.delete(uri);
-    this.diagnosticsInFlight.delete(uri);
-  }
-
-  private scheduleTsgoDiagnostics(uri: string): void {
-    if (this.server !== "tsgo") return;
-
-    if (this.init.state !== "done") {
-      this.pendingDiagnosticsAfterInit.add(uri);
-      return;
-    }
-
-    const existing = this.diagnosticDebounce.get(uri);
-    if (existing) clearTimeout(existing);
-
-    const timer = setTimeout(() => {
-      this.diagnosticDebounce.delete(uri);
-      this.requestTsgoDiagnostics(uri);
-    }, 150);
-
-    this.diagnosticDebounce.set(uri, timer);
-  }
-
-  private requestTsgoDiagnostics(uri: string): void {
-    if (this.server !== "tsgo") return;
-    if (this.diagnosticsInFlight.has(uri)) return;
-
-    this.diagnosticsInFlight.add(uri);
-
-    const serverReqId = this.nextServerRequestId++;
-    this.pendingInternalRequests.set(serverReqId, { kind: "tsgo_pull_diagnostics", uri });
-
-    this.writeToServer({
-      jsonrpc: "2.0",
-      id: serverReqId,
-      method: "textDocument/diagnostic",
-      params: {
-        textDocument: { uri },
-        identifier: null,
-        previousResultId: null,
-      },
-    } as JsonRpcMessage);
+    this.diagnosticsBridge?.onFileEvent(method, uri);
   }
 
   private onInternalServerResponse(internal: PendingInternalRequest, msg: JsonRpcMessage): void {
-    if (internal.kind === "tsgo_pull_diagnostics") {
-      this.diagnosticsInFlight.delete(internal.uri);
-
-      const result = (msg as any).result;
-
-      let diagnostics: unknown[] = [];
-      if (result?.kind === "full" && Array.isArray(result.items)) {
-        diagnostics = result.items;
-      } else if (result?.kind === "unchanged") {
-        diagnostics = this.lastPublishedDiagnostics.get(internal.uri) ?? [];
-      } else if (Array.isArray(result?.items)) {
-        diagnostics = result.items;
-      }
-
-      this.lastPublishedDiagnostics.set(internal.uri, diagnostics);
-      this.publishDiagnosticsToNonPullClients(internal.uri, diagnostics);
+    if (internal.kind === "bridge_pull_diagnostics") {
+      this.diagnosticsBridge?.onServerResponse(internal.uri, msg);
       return;
     }
   }
@@ -687,18 +625,6 @@ class MuxState {
         method: "textDocument/publishDiagnostics",
         params: { uri, diagnostics },
       } as JsonRpcMessage);
-    }
-  }
-
-  private flushQueuedDiagnosticsAfterInit(): void {
-    if (this.server !== "tsgo") return;
-    if (this.init.state !== "done") return;
-
-    const queued = Array.from(this.pendingDiagnosticsAfterInit);
-    this.pendingDiagnosticsAfterInit.clear();
-
-    for (const uri of queued) {
-      this.scheduleTsgoDiagnostics(uri);
     }
   }
 
@@ -734,13 +660,40 @@ class MuxState {
   private writeToServer(msg: JsonRpcMessage): void {
     this.lspWriter.write(encodeMessage(msg));
   }
+
+  private sendDiagnosticsRequest(uri: string, msg: JsonRpcMessage): void {
+    const serverReqId = this.nextServerRequestId++;
+    this.pendingInternalRequests.set(serverReqId, { kind: "bridge_pull_diagnostics", uri });
+    this.writeToServer({ ...msg, id: serverReqId });
+  }
+
+  private hasNonPullClients(): boolean {
+    for (const clientId of this.clients.keys()) {
+      if (!this.clientSupportsPullDiagnostics.get(clientId)) return true;
+    }
+    return false;
+  }
+
+  private usesDiagnosticsBridge(): boolean {
+    return this.spec.diagnostics?.mode === "pullToPushBridge";
+  }
+
+  private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
+    if (this.opts.onExit) {
+      this.opts.onExit(code, signal);
+      return;
+    }
+
+    process.exitCode = code ?? 1;
+    process.exit();
+  }
 }
 
 async function spawnLsp(
-  server: ServerName,
+  spec: ServerSpec,
   projectRoot: string,
 ): Promise<ChildProcessWithoutNullStreams> {
-  const { cmd, args } = await findBinary(server, projectRoot);
+  const { cmd, args } = await findBinaryForSpec(spec, projectRoot);
 
   // If we found a JS entrypoint (e.g. @typescript/native-preview/bin/tsgo.js),
   // run it with Node to match upstream expectations.
